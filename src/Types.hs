@@ -13,7 +13,7 @@ module Types where
 import Data.Aeson
 import Data.Aeson.TH                        (deriveJSON, defaultOptions)
 import Data.Text                            (Text)
-import Data.Singletons                      (Sing(..), SingI(..))
+import Data.Singletons                      (Sing(..), SingI(..), SingKind(..))
 import Data.Singletons.TH                   (genSingletons)
 import Data.Vinyl.Core                      (Rec(..))
 import Data.Vinyl.Lens
@@ -39,7 +39,7 @@ makeLenses ''Attr
 instance ToField (ElF f) => ToField (Attr f) where
   toField = toField . _unAttr
 
-(=::) :: KnownSymbol f => Sing f -> ElF f -> Attr f
+(=::) :: Sing f -> ElF f -> Attr f
 _ =:: x = Attr x
 
 --------------------------------------------------------------------------------
@@ -58,7 +58,7 @@ type User = '["personId", "username", "email"]
 
 instance ToRow (Rec Attr NewUser) where
   toRow usr = toRow
-    ( usr ^. rlens (sing :: Sing "username")
+    ( usr ^. rlens (toSing "username")
     , usr ^. rlens (sing :: Sing "email")
     )
 

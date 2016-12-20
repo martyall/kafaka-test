@@ -21,3 +21,4 @@ data CrudF next :: * where
   UpdateOp :: Sing (k :: CrudType) -> Updatable k -> (Object k -> next)
   DeleteOp :: Sing (k :: CrudType) -> Deletable k -> (() -> next)
 
+ wc
