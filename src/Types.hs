@@ -3,22 +3,14 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE PolyKinds #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE UndecidableInstances #-}
 
 module Types where
 
 import Data.Aeson
-import Data.Aeson.TH                        (deriveJSON, defaultOptions)
+import Data.Aeson.TH                        (deriveJSON, deriveFromJSON
+                                            ,defaultOptions)
 import Data.Text                            (Text)
-import Data.Singletons                      (Sing(..), SingI(..), SingKind(..))
 import Data.Singletons.TH                   (genSingletons)
-import Data.Vinyl.Core                      (Rec(..))
-import Data.Vinyl.Lens
-import Control.Lens                  hiding (Identity)
-import Control.Lens.TH
 
 import Database.PostgreSQL.Simple.FromRow   (FromRow(..), field)
 import Database.PostgreSQL.Simple.ToRow     (ToRow(..))
@@ -26,76 +18,99 @@ import Database.PostgreSQL.Simple.FromField (FromField(..))
 import Database.PostgreSQL.Simple.ToField   (ToField(..))
 import Database.PostgreSQL.Simple.Types     (Only(..))
 
-import GHC.TypeLits
 --------------------------------------------------------------------------------
--- | Fields
+-- | CRUD types
 --------------------------------------------------------------------------------
 
-type family ElF (f :: Symbol) :: *
+data CrudType = CrudUser
+              | CrudMedia
 
-newtype Attr f = Attr { _unAttr :: ElF f }
-makeLenses ''Attr
+genSingletons [''CrudType]
 
-instance ToField (ElF f) => ToField (Attr f) where
-  toField = toField . _unAttr
+type family ReadData (c :: CrudType) :: *
 
-(=::) :: Sing f -> ElF f -> Attr f
-_ =:: x = Attr x
+type family BaseData (c :: CrudType) :: *
+
+type family NewData (c :: CrudType) :: *
 
 --------------------------------------------------------------------------------
 -- | User
 --------------------------------------------------------------------------------
 
+data NewUser = NewUser
+  { newUserUsername :: Text
+  , newUserEmail    :: Text
+  }
+
+$(deriveJSON defaultOptions ''NewUser)
+
+instance ToRow NewUser where
+  toRow (NewUser nuName nuEmail) = toRow (nuName, nuEmail)
+
 newtype UserId = UserId Integer
   deriving (Eq, Show, FromJSON, ToJSON, FromField, ToField)
 
-type instance ElF "personId" = UserId
-type instance ElF "username" = Text
-type instance ElF "email" = Text
+data User = User
+  { userId       :: UserId
+  , userUsername :: UserId
+  , userEmail    :: Text
+  } deriving (Eq, Show)
 
-type NewUser = '["username", "email"]
-type User = '["personId", "username", "email"]
+$(deriveJSON defaultOptions ''User)
 
-instance ToRow (Rec Attr NewUser) where
-  toRow usr = toRow
-    ( usr ^. rlens (toSing "username")
-    , usr ^. rlens (sing :: Sing "email")
-    )
+instance FromRow User where
+  fromRow = User <$> field <*> field <*> field
 
-instance FromRow (Rec Attr User) where
-  fromRow = do
-    uId <- field
-    uName <- field
-    uEmail <- field
-    return $ ((sing :: Sing "personId") =:: uId)
-          :& ((sing :: Sing "username") =:: uName)
-          :& ((sing :: Sing "email")    =:: uEmail)
-          :& RNil
+instance ToRow User where
+  toRow (User uId uName uEmail) = toRow (uId, uName, uEmail)
 
-instance ToRow (Rec Attr User) where
-  toRow usr = toRow
-    ( usr ^. rlens (sing :: Sing "personId")
-    , usr ^. rlens (sing :: Sing "username")
-    , usr ^. rlens (sing :: Sing "email")
-    )
+type instance ReadData 'CrudUser = UserId
+
+type instance BaseData 'CrudUser = User
+
+type instance NewData 'CrudUser = NewUser
 
 ----------------------------------------------------------------------------------
 ---- | Media
 ----------------------------------------------------------------------------------
---
---newtype MediaId = MediaId Integer
---  deriving (Eq, Show, FromJSON, ToJSON, FromField, ToField)
---
---data Media = Media
---  { mediaId      :: MediaId
---  , mediaOwner   :: UserId
---  , mediaCaption :: Text
---  } deriving (Eq, Show)
---
--- $(deriveJSON defaultOptions ''Media)
---
---instance FromRow Media where
---  fromRow = Media <$> field <*> field <*> field
---
---instance ToRow Media where
---  toRow (Media mId mOId mCap) = toRow (mId, mOId, mCap)
+
+data NewMedia = NewMedia
+  { newMediaOwner   :: UserId
+  , newMediaCaption :: Text
+  , newMediaRef     :: Text
+  } deriving (Eq, Show)
+
+$(deriveFromJSON defaultOptions ''NewMedia)
+
+instance ToRow NewMedia where
+  toRow (NewMedia mOId mCap mRef) = toRow (mOId, mCap, mRef)
+
+newtype MediaId = MediaId Integer
+  deriving (Eq, Show, FromJSON, ToJSON, FromField, ToField)
+
+data Media = Media
+  { mediaId      :: MediaId
+  , mediaOwner   :: UserId
+  , mediaCaption :: Text
+  , mediaRef     :: Text
+  } deriving (Eq, Show)
+
+$(deriveJSON defaultOptions ''Media)
+
+instance FromRow Media where
+  fromRow = Media <$> field <*> field <*> field <*> field
+
+instance ToRow Media where
+  toRow (Media mId mOId mCap mRef) = toRow (mId, mOId, mCap, mRef)
+
+type instance ReadData 'CrudMedia = MediaId
+
+type instance BaseData 'CrudMedia = Media
+
+type instance NewData 'CrudMedia = NewMedia
+
+--------------------------------------------------------------------------------
+-- | Error Types
+--------------------------------------------------------------------------------
+
+data AppError = NoResults Text
