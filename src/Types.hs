@@ -2,16 +2,29 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 module Types where
 
-import Data.Aeson
+import Control.Error                        (ExceptT)
+import Control.Lens                         ((^.))
+import Control.Lens.TH                      (makeLenses)
+import Control.Monad.Reader                 (ask)
+import Control.Monad.Trans                  (lift, MonadIO(..))
+import Control.Monad.Trans.Reader           (ReaderT)
+
+
+import Data.Aeson                           (FromJSON, ToJSON)
 import Data.Aeson.TH                        (deriveJSON, deriveFromJSON
                                             ,defaultOptions)
 import Data.Text                            (Text)
 import Data.Singletons.TH                   (genSingletons)
 
+import Database.PostgreSQL.Simple           (Connection)
 import Database.PostgreSQL.Simple.FromRow   (FromRow(..), field)
 import Database.PostgreSQL.Simple.ToRow     (ToRow(..))
 import Database.PostgreSQL.Simple.FromField (FromField(..))
@@ -40,7 +53,7 @@ type family NewData (c :: CrudType) :: *
 data NewUser = NewUser
   { newUserUsername :: Text
   , newUserEmail    :: Text
-  }
+  } deriving (Eq, Show)
 
 $(deriveJSON defaultOptions ''NewUser)
 
@@ -52,7 +65,7 @@ newtype UserId = UserId Integer
 
 data User = User
   { userId       :: UserId
-  , userUsername :: UserId
+  , userUsername :: Text
   , userEmail    :: Text
   } deriving (Eq, Show)
 
@@ -114,3 +127,25 @@ type instance NewData 'CrudMedia = NewMedia
 --------------------------------------------------------------------------------
 
 data AppError = NoResults Text
+
+--------------------------------------------------------------------------------
+-- | Handler
+--------------------------------------------------------------------------------
+
+data AppEnv = AppEnv
+  { _pg :: Connection }
+
+makeLenses ''AppEnv
+
+type Handler = ExceptT AppError (ReaderT AppEnv IO)
+
+class MonadIO m => HasPostgres m where
+  getPostgresConnection :: m Connection
+
+instance MonadIO m => HasPostgres (ReaderT AppEnv m) where
+  getPostgresConnection = do
+    appEnv <- ask
+    return $ appEnv ^. pg
+
+instance HasPostgres m => HasPostgres (ExceptT e m) where
+  getPostgresConnection = lift getPostgresConnection
