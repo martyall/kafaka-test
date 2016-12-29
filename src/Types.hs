@@ -39,6 +39,7 @@ import Data.Singletons                      (Sing)
 import Data.Singletons.TH                   (genSingletons)
 import Database.PostgreSQL.Simple           (Connection, ConnectInfo(..),
                                              connect)
+import Database.PostgreSQL.Simple.Internal  (newNullConnection)
 import Opaleye                              (Column, Table(Table),
                                              required, optional,
                                              PGInt4, PGText,
@@ -107,7 +108,11 @@ data NewUser = NewUser
 
 makeLenses ''NewUser
 
-$(deriveJSON defaultOptions ''NewUser)
+instance FromJSON NewUser where
+  parseJSON (Object v) =
+    NewUser <$> v .: "userUsername"
+            <*> v .: "userEmail"
+  parseJSON v = typeMismatch "NewUser" v
 
 newtype UserId = UserId { _getUserId :: Int }
   deriving (Eq, Show, FromJSON, ToJSON, FromHttpApiData, QueryRunnerColumnDefault PGInt4)
@@ -131,7 +136,7 @@ instance FromJSON User where
     User' <$> v .: "userId"
           <*> v .: "userUsername"
           <*> v .: "userEmail"
-  parseJSON v = typeMismatch "user" v
+  parseJSON v = typeMismatch "User" v
 
 instance ToJSON User where
   toJSON usr = object [ "userId" .= (usr ^. userId)
@@ -232,7 +237,7 @@ type instance NewData 'CrudUser = NewUser
 --                 ref = P.pgStrictText $ med ^. mediaRef
 --              in Media' mId owner cap ref
 --------------------------------------------------------------------------------
--- | AppHandler
+-- | App Config
 --------------------------------------------------------------------------------
 
 data AppEnv = AppEnv
@@ -253,6 +258,8 @@ mkPG cfg =
 mkAppEnv :: IO AppEnv
 mkAppEnv = do
   conf <- C.load [ C.Required "app.cfg" ]
-  pgConn <- (mkPG $ C.subconfig "pg" conf) >>= connect
   appE <- mkEnv $ C.subconfig "env" conf
+  pgConn <- if appE == Test
+            then newNullConnection
+            else (mkPG $ C.subconfig "pg" conf) >>= connect
   return $ AppEnv pgConn appE

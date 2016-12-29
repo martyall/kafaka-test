@@ -6,7 +6,7 @@ module Site
     ( startApp
     ) where
 
-import Control.Monad.Reader
+import Control.Monad.Reader (ReaderT(..))
 import Network.Wai
 import Network.Wai.Handler.Warp
 import Servant
@@ -26,16 +26,18 @@ type API =
 --  :<|>  "media" :> ReqBody '[JSON] Media :> Put '[JSON] Media
 --  :<|>  "media" :> Capture "mediaId" MediaId :> Delete '[JSON] ()
 
-createUser :: NewUser -> ReaderT AppEnv Handler User
+type AppHandler = ReaderT AppEnv Handler
+
+createUser :: NewUser -> AppHandler User
 createUser nUsr = interpretCrud $ createOp SCrudUser nUsr
 
-readUser :: UserId -> ReaderT AppEnv Handler User
+readUser :: UserId -> AppHandler User
 readUser uId = interpretCrud $ readOp SCrudUser uId
 
-updateUser :: User -> ReaderT AppEnv Handler User
+updateUser :: User -> AppHandler User
 updateUser usr = interpretCrud $ updateOp SCrudUser usr
 
-deleteUser :: UserId -> ReaderT AppEnv Handler ()
+deleteUser :: UserId -> AppHandler ()
 deleteUser uId = interpretCrud $ deleteOp SCrudUser uId
 
 startApp :: IO ()
