@@ -1,4 +1,9 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ExistentialQuantification #-}
@@ -18,18 +23,54 @@ import Control.Monad.Trans                  (lift, MonadIO(..))
 import Control.Monad.Trans.Reader           (ReaderT)
 
 
-import Data.Aeson                           (FromJSON, ToJSON)
+import Data.Aeson                           (FromJSON(..), ToJSON(..),
+                                             object, (.=), (.:))
+import Data.Aeson.Types                     (Value(..), typeMismatch)
 import Data.Aeson.TH                        (deriveJSON, deriveFromJSON
                                             ,defaultOptions)
-import Data.Text                            (Text)
-import Data.Singletons.TH                   (genSingletons)
+import Data.CaseInsensitive
+import qualified Data.Configurator as C
+import qualified Data.Configurator.Types as C
 
-import Database.PostgreSQL.Simple           (Connection)
-import Database.PostgreSQL.Simple.FromRow   (FromRow(..), field)
-import Database.PostgreSQL.Simple.ToRow     (ToRow(..))
-import Database.PostgreSQL.Simple.FromField (FromField(..))
-import Database.PostgreSQL.Simple.ToField   (ToField(..))
-import Database.PostgreSQL.Simple.Types     (Only(..))
+import Data.Profunctor.Product              (p3, p4)
+import Data.Profunctor.Product.TH           (makeAdaptorAndInstance)
+import Data.Text                            (Text)
+import Data.Singletons                      (Sing)
+import Data.Singletons.TH                   (genSingletons)
+import Database.PostgreSQL.Simple           (Connection, ConnectInfo(..),
+                                             connect)
+import Opaleye                              (Column, Table(Table),
+                                             required, optional,
+                                             PGInt4, PGText,
+                                             PGCitext)
+import Opaleye.Internal.RunQuery            (QueryRunnerColumnDefault(..))
+import qualified Opaleye.PGTypes as P
+import Servant                              (ServantErr)
+
+import Web.HttpApiData                      (FromHttpApiData)
+
+import Orphans                              ()
+
+--------------------------------------------------------------------------------
+-- | Environment
+--------------------------------------------------------------------------------
+
+data Environment =
+    Development
+  | Test
+  deriving (Eq, Show, Read)
+
+
+mkEnv :: C.Config -> IO Environment
+mkEnv cfg = read <$> C.require cfg "Environment"
+
+--------------------------------------------------------------------------------
+-- | Misc
+--------------------------------------------------------------------------------
+
+type f ~> g = forall a. f a -> g a
+
+type Handler = ExceptT ServantErr IO
 
 --------------------------------------------------------------------------------
 -- | CRUD types
@@ -46,36 +87,85 @@ type family BaseData (c :: CrudType) :: *
 
 type family NewData (c :: CrudType) :: *
 
+class PGEntity e where
+  type WriteRow e :: *
+  toPG :: e -> WriteRow e
+
+class Example (k :: CrudType) where
+  exampleId :: Sing k -> ReadData k
+  exampleBase :: Sing k -> BaseData k
+  exampleNew :: Sing k -> NewData k
+
 --------------------------------------------------------------------------------
 -- | User
 --------------------------------------------------------------------------------
 
 data NewUser = NewUser
-  { newUserUsername :: Text
-  , newUserEmail    :: Text
+  { _newUserUsername :: CI Text
+  , _newUserEmail    :: CI Text
   } deriving (Eq, Show)
+
+makeLenses ''NewUser
 
 $(deriveJSON defaultOptions ''NewUser)
 
-instance ToRow NewUser where
-  toRow (NewUser nuName nuEmail) = toRow (nuName, nuEmail)
+newtype UserId = UserId { _getUserId :: Int }
+  deriving (Eq, Show, FromJSON, ToJSON, FromHttpApiData, QueryRunnerColumnDefault PGInt4)
 
-newtype UserId = UserId Integer
-  deriving (Eq, Show, FromJSON, ToJSON, FromField, ToField)
+makeLenses ''UserId
 
-data User = User
-  { userId       :: UserId
-  , userUsername :: Text
-  , userEmail    :: Text
-  } deriving (Eq, Show)
+data User' a b c = User'
+  { _userId       :: a
+  , _userUsername :: b
+  , _userEmail    :: c
+  }
 
-$(deriveJSON defaultOptions ''User)
+makeLenses ''User'
 
-instance FromRow User where
-  fromRow = User <$> field <*> field <*> field
+type User = User' UserId (CI Text) (CI Text)
 
-instance ToRow User where
-  toRow (User uId uName uEmail) = toRow (uId, uName, uEmail)
+-- $(deriveJSON defaultOptions ''User' UserId (CI Text) (CI Text))
+
+instance FromJSON User where
+  parseJSON (Object v) =
+    User' <$> v .: "userId"
+          <*> v .: "userUsername"
+          <*> v .: "userEmail"
+  parseJSON v = typeMismatch "user" v
+
+instance ToJSON User where
+  toJSON usr = object [ "userId" .= (usr ^. userId)
+                      , "userUsername" .= (usr ^. userUsername)
+                      , "userEmail" .= (usr ^. userEmail)
+                      ]
+
+type NewUserRow = User' (Maybe (Column PGInt4)) (Column PGCitext) (Column PGCitext)
+type UserRow = User' (Column PGInt4) (Column PGCitext) (Column PGCitext)
+
+$(makeAdaptorAndInstance "pUser" ''User')
+
+instance PGEntity NewUser where
+  type WriteRow NewUser = NewUserRow
+  toPG nUsr = let name = P.pgCiStrictText $ nUsr ^. newUserUsername
+                  email = P.pgCiStrictText $ nUsr ^. newUserEmail
+              in User' Nothing name email
+
+instance PGEntity User where
+  type WriteRow User = NewUserRow
+  toPG usr = let uId = Just $ P.pgInt4 $ usr ^. userId ^. getUserId
+                 name = P.pgCiStrictText $ usr ^. userUsername
+                 email = P.pgCiStrictText $ usr ^. userEmail
+             in User' uId name email
+
+instance Example 'CrudUser where
+  exampleId _ = UserId 1
+  exampleBase _ = User' (UserId 1) (mk "ali") (mk "ali@gmail.com")
+  exampleNew _ = NewUser (mk "ali") (mk "ali@gmail.com")
+
+userTable :: Table NewUserRow UserRow
+userTable = Table "users" (pUser User' { _userId = optional "id"
+                                       , _userUsername = required "username"
+                                       , _userEmail = required "email" })
 
 type instance ReadData 'CrudUser = UserId
 
@@ -87,65 +177,82 @@ type instance NewData 'CrudUser = NewUser
 ---- | Media
 ----------------------------------------------------------------------------------
 
-data NewMedia = NewMedia
-  { newMediaOwner   :: UserId
-  , newMediaCaption :: Text
-  , newMediaRef     :: Text
-  } deriving (Eq, Show)
+--data NewMedia = NewMedia
+--  { _newMediaOwner   :: UserId
+--  , _newMediaCaption :: CI Text
+--  , _newMediaRef     :: Text
+--  }
+--
+--makeLenses ''NewMedia
+---- $(deriveFromJSON defaultOptions ''NewMedia)
+--
+--newtype MediaId = MediaId {_getMediaId :: Int}
+--  deriving (Eq, Show, FromJSON, ToJSON, FromHttpApiData, QueryRunnerColumnDefault PGInt4)
+--
+--makeLenses ''MediaId
+--
+--data Media' a b c d = Media'
+--  { _mediaId      :: a
+--  , _mediaOwner   :: b
+--  , _mediaCaption :: c
+--  , _mediaRef     :: d
+--  }
+--
+--makeLenses ''Media'
+---- $(deriveJSON defaultOptions ''Media')
+--
+--type Media = Media' MediaId UserId (CI Text) Text
+--type NewMediaColumn = Media' (Maybe (Column PGInt4)) (Column PGInt4) (Column PGCitext) (Column PGText)
+--type MediaColumn = Media' (Column PGInt4) (Column PGInt4) (Column PGCitext) (Column PGText)
+--
+-- $(makeAdaptorAndInstance "pMedia" ''Media')
+--
+--mediaTable :: Table NewMediaColumn MediaColumn
+--mediaTable = Table "media" (pMedia Media' { _mediaId =  optional "id"
+--                                          , _mediaOwner = required "owner_id"
+--                                          , _mediaCaption = required "caption"
+--                                          , _mediaRef = required "ref" })
+--
+--type instance ReadData 'CrudMedia = MediaId
+--
+--type instance BaseData 'CrudMedia = Media
+--
+--type instance NewData 'CrudMedia = NewMedia
 
-$(deriveFromJSON defaultOptions ''NewMedia)
-
-instance ToRow NewMedia where
-  toRow (NewMedia mOId mCap mRef) = toRow (mOId, mCap, mRef)
-
-newtype MediaId = MediaId Integer
-  deriving (Eq, Show, FromJSON, ToJSON, FromField, ToField)
-
-data Media = Media
-  { mediaId      :: MediaId
-  , mediaOwner   :: UserId
-  , mediaCaption :: Text
-  , mediaRef     :: Text
-  } deriving (Eq, Show)
-
-$(deriveJSON defaultOptions ''Media)
-
-instance FromRow Media where
-  fromRow = Media <$> field <*> field <*> field <*> field
-
-instance ToRow Media where
-  toRow (Media mId mOId mCap mRef) = toRow (mId, mOId, mCap, mRef)
-
-type instance ReadData 'CrudMedia = MediaId
-
-type instance BaseData 'CrudMedia = Media
-
-type instance NewData 'CrudMedia = NewMedia
-
+--instance PGEntity MediaCrud where
+--  toPG nMed = let owner = P.pgInt4 $ nMed ^. newMediaOwner ^. getUserId
+--                  cap = P.pgCiStrictText $ nMed ^. newMediaCaption
+--                  ref = P.pgStrictText $ nMed ^. newMediaRef
+--              in Media' Nothing owner cap ref
+--
+--instance PGEntity Media MediaColumn where
+--  toPG med = let mId = P.pgInt4 $ med ^. mediaId ^. getMediaId
+--                 owner = P.pgInt4 $ med ^. mediaOwner ^. getUserId
+--                 cap = P.pgCiStrictText $ med ^. mediaCaption
+--                 ref = P.pgStrictText $ med ^. mediaRef
+--              in Media' mId owner cap ref
 --------------------------------------------------------------------------------
--- | Error Types
---------------------------------------------------------------------------------
-
-data AppError = NoResults Text
-
---------------------------------------------------------------------------------
--- | Handler
+-- | AppHandler
 --------------------------------------------------------------------------------
 
 data AppEnv = AppEnv
-  { _pg :: Connection }
+  { _pgConnection :: Connection
+  , _appEnv :: Environment
+  }
 
 makeLenses ''AppEnv
 
-type Handler = ExceptT AppError (ReaderT AppEnv IO)
+mkPG :: C.Config -> IO ConnectInfo
+mkPG cfg =
+  ConnectInfo <$> C.require cfg "host"
+              <*> C.require cfg "port"
+              <*> C.require cfg "user"
+              <*> C.require cfg "password"
+              <*> C.require cfg "db"
 
-class MonadIO m => HasPostgres m where
-  getPostgresConnection :: m Connection
-
-instance MonadIO m => HasPostgres (ReaderT AppEnv m) where
-  getPostgresConnection = do
-    appEnv <- ask
-    return $ appEnv ^. pg
-
-instance HasPostgres m => HasPostgres (ExceptT e m) where
-  getPostgresConnection = lift getPostgresConnection
+mkAppEnv :: IO AppEnv
+mkAppEnv = do
+  conf <- C.load [ C.Required "app.cfg" ]
+  pgConn <- (mkPG $ C.subconfig "pg" conf) >>= connect
+  appE <- mkEnv $ C.subconfig "env" conf
+  return $ AppEnv pgConn appE

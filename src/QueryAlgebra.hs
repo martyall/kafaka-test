@@ -4,19 +4,34 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
-module QueryAlgebra where
+module QueryAlgebra
+  ( createOp
+  , readOp
+  , updateOp
+  , deleteOp
+  , interpretCrud
+  ) where
 
-import Data.Functor.Identity
-import Database.PostgreSQL.Simple (Connection)
+import           Data.Functor.Identity      (Identity(..))
+import           Database.PostgreSQL.Simple (Connection)
 
-import Control.Error
-import Control.Monad.Freer
-import Control.Monad.Freer.Reader
-import Control.Monad.Freer.Internal
+import           Control.Error
+import           Control.Lens               ((^.))
+import           Control.Monad.IO.Class
+import           Control.Monad.Trans
+import qualified Control.Monad.Reader as R
+import           Control.Monad.Freer
+import           Control.Monad.Freer.Exception
+import           Control.Monad.Freer.Reader
+import           Control.Monad.Freer.Internal
 
-import Queries
-import Types
+import           Servant (ServantErr, err404)
+
+import           Queries
+import           Types
 
 --------------------------------------------------------------------------------
 -- CRUD query algebra and smart constructors
@@ -28,90 +43,79 @@ data Crud k s :: * where
   UpdateOp :: Sing (k :: CrudType) -> BaseData k -> Crud k (BaseData k)
   DeleteOp :: Sing (k :: CrudType) -> ReadData k -> Crud k ()
 
-createOp :: Member (Crud k) r
-         => Sing (k :: CrudType)
+createOp :: Sing (k :: CrudType)
          -> NewData k
-         -> Eff r (BaseData k)
+         -> Eff '[Crud k] (BaseData k)
 createOp s n = send $ CreateOp s n
 
-readOp :: Member (Crud k) r
-         => Sing (k :: CrudType)
+readOp :: Sing (k :: CrudType)
          -> ReadData k
-         -> Eff r (BaseData k)
+         -> Eff '[Crud k] (BaseData k)
 readOp s n = send $ ReadOp s n
 
-updateOp :: Member (Crud k) r
-         => Sing (k :: CrudType)
+updateOp :: Sing (k :: CrudType)
          -> BaseData k
-         -> Eff r (BaseData k)
+         -> Eff '[Crud k] (BaseData k)
 updateOp s n = send $ UpdateOp s n
 
-deleteOp :: Member (Crud k) r
-         => Sing (k :: CrudType)
+deleteOp :: Sing (k :: CrudType)
          -> ReadData k
-         -> Eff r ()
+         -> Eff '[Crud k] ()
 deleteOp s n = send $ DeleteOp s n
 
 -- | Impure interpreters
 
-runUser :: Member Handler r
-        => Eff (Crud 'CrudUser ': r) a
-        -> Eff r a
-runUser = runNat runUser'
-  where
-    runUser' :: Crud 'CrudUser a -> Handler a
-    runUser' c = case c of
-      (CreateOp _ nUsr) -> (liftPG createUser) nUsr
-      (ReadOp _ uId) -> (liftPG readUser) uId
-      (UpdateOp _ usr) -> (liftPG updateUser) usr
-      (DeleteOp _ uId) -> (liftPG deleteUser) uId
+runImpure :: Queryable k
+        => Eff '[Crud k] ~> Eff '[Reader AppEnv, Exc ServantErr, IO]
+runImpure (Val a) = return a
+runImpure (E u q) = do
+  (e :: AppEnv) <- ask
+  let conn = e ^. pgConnection
+  case extract u of
+    (CreateOp s newA) -> do
+      mA <- send $ (createQuery s) conn newA
+      a <- maybe (throwError err404) return mA
+      runImpure $ qApp q a
+    (ReadOp s aId) -> do
+      mA <- send $ (readQuery s) conn aId
+      a <- maybe (throwError err404) return mA
+      runImpure $ qApp q a
+    (UpdateOp s a) -> do
+      mA <- send $ (updateQuery s) conn a
+      a' <- maybe (throwError err404) return mA
+      runImpure $ qApp q a'
+    (DeleteOp s aId) -> do
+      _ <- send $ (deleteQuery s) conn aId
+      runImpure $ qApp q ()
 
-runMedia :: Member Handler r
-         => Eff (Crud 'CrudMedia ': r) a
-         -> Eff r a
-runMedia = runNat runMedia'
-  where
-    runMedia' :: Crud 'CrudMedia a -> Handler a
-    runMedia' c = case c of
-      (CreateOp _ nUsr) -> (liftPG createMedia) nUsr
-      (ReadOp _ uId) -> (liftPG readMedia) uId
-      (UpdateOp _ usr) -> (liftPG updateMedia) usr
-      (DeleteOp _ uId) -> (liftPG deleteMedia) uId
+interpretPG :: Eff '[Reader AppEnv, Exc ServantErr, IO] ~> R.ReaderT AppEnv Handler
+interpretPG m = R.ReaderT $ \e -> ExceptT $ runM $ runError $ runReader m e
 
--- | PureInterpreters
 
---aliNew :: NewUser
---aliNew = NewUser "ali-babba" "ali@gmail.com"
+---- | PureInterpreters
 
-ali :: User
-ali = User (UserId 1) "ali-babba" "ali@gmail.com"
+runPure :: Example k
+        => Eff '[Crud k] ~> Eff '[Identity]
+runPure (Val a) = return a
+runPure (E u q) = case extract u of
+  (CreateOp s _) -> do
+    a <- send . Identity $ exampleBase s
+    runPure $ qApp q a
+  (ReadOp s _) -> do
+    a <- send . Identity $ exampleBase s
+    runPure $ qApp q a
+  (UpdateOp s _) -> do
+    a <- send . Identity $ exampleBase s
+    runPure $ qApp q a
+  (DeleteOp s _) -> runPure $ qApp q ()
 
---photoNew :: NewMedia
---photoNew = NewMedia (UserId 1) "jin" "MEDIAREF"
+interpretPure :: Eff '[Identity] ~> R.ReaderT AppEnv Handler
+interpretPure m = (return . runIdentity . runM $ m)
 
-photo :: Media
-photo = Media (MediaId 1) (UserId 1) "jin" "MEDIAREF"
-
-runUserPure :: Member Identity r
-            => Eff (Crud 'CrudUser ': r) a
-            -> Eff r a
-runUserPure = runNat runUserPure'
-  where
-    runUserPure' :: Crud 'CrudUser a -> Identity a
-    runUserPure' c = case c of
-      (CreateOp _ _) -> return ali
-      (ReadOp _ _) -> return ali
-      (UpdateOp _ _) -> return ali
-      (DeleteOp _ _) -> return ()
-
-runMediaPure :: Member Identity r
-             => Eff (Crud 'CrudMedia ': r) a
-             -> Eff r a
-runMediaPure = runNat runMediaPure'
-  where
-    runMediaPure' :: Crud 'CrudMedia a -> Identity a
-    runMediaPure' c = case c of
-      (CreateOp _ _) -> return photo
-      (ReadOp _ _) -> return photo
-      (UpdateOp _ _) -> return photo
-      (DeleteOp _ _) -> return ()
+interpretCrud :: (Example k, Queryable k)
+              => Eff '[Crud k] ~> R.ReaderT AppEnv Handler
+interpretCrud m = do
+  e <- R.ask
+  case e ^. appEnv of
+    Development -> interpretPG . runImpure $ m
+    Test -> interpretPure . runPure $ m

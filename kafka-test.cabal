@@ -16,16 +16,23 @@ cabal-version:       >=1.10
 library
   hs-source-dirs:      src
   exposed-modules:     Site
+                     , Orphans
                      , QueryAlgebra
                      , Queries
                      , Types
   build-depends:       base >= 4.7 && < 5
                      , aeson
+                     , bytestring
+                     , case-insensitive
+                     , configurator
                      , errors
                      , freer
-                     , mtl
+                     , http-api-data
                      , lens
+                     , mtl
+                     , opaleye
                      , postgresql-simple
+                     , product-profunctors
                      , servant-server
                      , singletons
                      , string-conv
