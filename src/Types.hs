@@ -47,7 +47,7 @@ import Opaleye                              (Column, Table(Table),
 import Opaleye.Internal.RunQuery            (QueryRunnerColumnDefault(..))
 import qualified Opaleye.PGTypes as P
 import Servant                              (ServantErr)
-
+import System.IO                            (FilePath)
 import Web.HttpApiData                      (FromHttpApiData)
 
 import Orphans                              ()
@@ -206,6 +206,7 @@ type instance NewData 'CrudUser = NewUser
 --makeLenses ''Media'
 ---- $(deriveJSON defaultOptions ''Media')
 --
+  
 --type Media = Media' MediaId UserId (CI Text) Text
 --type NewMediaColumn = Media' (Maybe (Column PGInt4)) (Column PGInt4) (Column PGCitext) (Column PGText)
 --type MediaColumn = Media' (Column PGInt4) (Column PGInt4) (Column PGCitext) (Column PGText)
@@ -247,19 +248,21 @@ data AppEnv = AppEnv
 
 makeLenses ''AppEnv
 
-mkPG :: C.Config -> IO ConnectInfo
-mkPG cfg =
-  ConnectInfo <$> C.require cfg "host"
-              <*> C.require cfg "port"
-              <*> C.require cfg "user"
-              <*> C.require cfg "password"
-              <*> C.require cfg "db"
+mkPG :: C.Config -> IO Connection
+mkPG cfg = do
+  host <- C.lookup cfg "host"
+  port <- C.lookup cfg "port"
+  user <- C.lookup cfg "user"
+  pwd <- C.lookup cfg "password"
+  db <-  C.lookup cfg "db"
+  let info = ConnectInfo <$> host <*> port <*> user <*> pwd <*> db
+  case info of
+    Nothing -> newNullConnection
+    Just info -> connect info
 
-mkAppEnv :: IO AppEnv
-mkAppEnv = do
-  conf <- C.load [ C.Required "app.cfg" ]
+mkAppEnv :: FilePath -> IO AppEnv
+mkAppEnv fp = do
+  conf <- C.load [ C.Required fp ]
   appE <- mkEnv $ C.subconfig "env" conf
-  pgConn <- if appE == Test
-            then newNullConnection
-            else (mkPG $ C.subconfig "pg" conf) >>= connect
+  pgConn <- mkPG $ C.subconfig "pg" conf
   return $ AppEnv pgConn appE

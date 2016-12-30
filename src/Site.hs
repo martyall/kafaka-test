@@ -10,6 +10,7 @@ import Control.Monad.Reader (ReaderT(..))
 import Network.Wai
 import Network.Wai.Handler.Warp
 import Servant
+import System.IO            (FilePath)
 
 import QueryAlgebra
 import Types hiding (Handler)
@@ -40,9 +41,9 @@ updateUser usr = interpretCrud $ updateOp SCrudUser usr
 deleteUser :: UserId -> AppHandler ()
 deleteUser uId = interpretCrud $ deleteOp SCrudUser uId
 
-startApp :: IO ()
-startApp = do
-  e <- mkAppEnv
+startApp :: FilePath -> IO ()
+startApp fp = do
+  e <- mkAppEnv fp
   run 8080 $ app e
 
 app :: AppEnv -> Application
